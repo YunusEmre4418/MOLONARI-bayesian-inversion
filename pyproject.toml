@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bayesian_inversion"
+version = "0.1.0"
+description = "Bayesian inversion tools (priors, DREAM proposal, energy, Gelman-Rubin diagnostic) used by pyheatmy"
+readme = "README.md"
+license =  {file = "LICENSE"}
+authors = [
+  {name = "Mathis Bourdin", email = "mathis.bourdin@mines-paristech.fr"},
+  {name = "Youri Tchouboukoff", email = "youri.tchouboukoff@mines-paristech.fr"},
+]
+dependencies = [
+    "numpy",
+]
+requires-python = ">= 3.9"
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/YunusEmre4418/MOLONARI-bayesian-inversion"
+
+[tool.setuptools]
+packages = ["bayesian_inversion"]
