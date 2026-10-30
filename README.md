@@ -1,7 +1,7 @@
 # bayesian_inversion
 
-Bayesian inversion tools used by [pyheatmy](https://github.com/YunusEmre4418/MOLONARI-pyheatmy) to estimate the
-parameters of a riverbed column from temperature measurements, part of the MOLONARI project.
+Bayesian inversion of the [pyheatmy](https://github.com/YunusEmre4418/MOLONARI-pyheatmy) direct model: estimation
+of the parameters of a riverbed column from temperature measurements, part of the MOLONARI project.
 
 - `Prior`: range of a parameter, its sampling scale (linear, log or symlog, chosen from the range) and the
   transforms between the physical and MCMC spaces; a parameter can be fixed.
@@ -9,14 +9,19 @@ parameters of a riverbed column from temperature measurements, part of the MOLON
 - `compute_energy`, `compute_log_acceptance`: negative log-posterior of Gaussian measurement errors, with missing
   measurements left out, and the Metropolis acceptance ratio.
 - `gelman_rubin`: R_hat of Gelman and Rubin (1992), as computed by DREAM, for the burn-in.
+- `InversionColumn` (`bayesian_inversion.inversion_column`): a `pyheatmy.Column` with the MCMC (DREAM with
+  several chains, random walk Metropolis with one), the records of its states, and the getters and plots of the
+  posterior: `compute_mcmc`, `get_best_layers`, `get_temperatures_quantile`, ...
 
-The DREAM and random walk loops themselves are still in `pyheatmy.Column.compute_mcmc`.
-
-`bayesian_inversion` does not import `pyheatmy`.
+Only `inversion_column` imports `pyheatmy`; `import bayesian_inversion` does not.
 
 ## Installation and tests
 
+`pyheatmy` is not on PyPI: install it first, from its checkout.
+
 ```sh
+pip install -e path/to/pyheatmy
 pip install -e .
-python -m pytest tests
+python -m pytest tests            # about 2 minutes
+python -m pytest tests -m "not slow"
 ```

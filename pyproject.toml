@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bayesian_inversion"
-version = "0.1.0"
-description = "Bayesian inversion tools (priors, DREAM proposal, energy, Gelman-Rubin diagnostic) used by pyheatmy"
+version = "0.2.0"
+description = "Bayesian inversion tools (priors, DREAM proposal, energy, Gelman-Rubin diagnostic) and the MCMC inversion of a pyheatmy column"
 readme = "README.md"
 license =  {file = "LICENSE"}
 authors = [
@@ -14,6 +14,10 @@ authors = [
 ]
 dependencies = [
     "numpy",
+    "matplotlib",
+    "psutil",
+    "tqdm",
+    "pyheatmy>=0.11",  # inversion_column only; not on PyPI: install it from its checkout first
 ]
 requires-python = ">= 3.9"
 
