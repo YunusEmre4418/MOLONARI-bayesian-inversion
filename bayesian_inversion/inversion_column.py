@@ -303,10 +303,10 @@ class InversionColumn(Column):
         else:  # cas single chain
             # float32: these samples only feed the quantiles, and their size grows with the length of the series
             _temp = np.zeros(
-                (sizesubsampling, self._nb_cells, len(self._times)), np.float32
+                (sizesubsampling, nb_cells_sous_ech, nb_times_sous_ech), np.float32
             )  # stockage des températures sous échantillonées pendant la mcmc
             _flows = np.zeros(
-                (sizesubsampling, self._nb_cells, len(self._times)), np.float32
+                (sizesubsampling, nb_cells_sous_ech, nb_times_sous_ech), np.float32
             )  # stockage des débits sous échantillonées pendant la mcmc
 
             # the direct model runs on self, which keeps the parameters of the last state of the chain

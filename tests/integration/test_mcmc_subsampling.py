@@ -1,7 +1,8 @@
 """Integration test of the subsampling of the MCMC states for the quantiles (InversionColumn.compute_mcmc): one sample is
 stored every n_sous_ech_iter iterations, n_sous_ech_iter = nb_chain * nb_iter // NSAMPLEMIN, for any number of
-iterations. With the layer parameters fixed, every state is the direct model, so every sample, and the minimum
-and maximum of the samples, equal it."""
+iterations, and a sample keeps one cell out of n_sous_ech_space and one time out of n_sous_ech_time. With the
+layer parameters fixed, every state is the direct model, so every sample, and the minimum and maximum of the
+samples, equal it."""
 
 import random
 
@@ -40,6 +41,7 @@ N_CHAIN_DREAM = 7                                 # at least 2 * delta + 1 for t
 ONE_CHAIN = 1                                     # random walk Metropolis
 QUANTILE_RTOL = 1e-6                              # float32 storage of the samples
 SUBSAMPLING_STEP = 2                              # one stored sample every two iterations
+SPACE_TIME_STEP = 2                               # one cell, or one time, out of two
 EXTREME_QUANTILES = (0.0, 1.0)                    # minimum and maximum: any sample that is not a state shows
 
 
@@ -76,3 +78,22 @@ def test_quantiles_of_fixed_parameters_are_the_direct_model(nb_chain, divisible,
                         nb_chain=nb_chain, nitmaxburning=N_BURN_IN_MAX)
     for quantile in column._quantiles_temperatures.values():
         assert quantile == pytest.approx(direct, rel=QUANTILE_RTOL)
+
+
+@pytest.mark.parametrize("nb_chain", [pytest.param(N_CHAIN_DREAM, id="DREAM"), pytest.param(ONE_CHAIN, id="RWM")])
+@pytest.mark.parametrize("space, time", [pytest.param(SPACE_TIME_STEP, 1, id="space"),
+                                         pytest.param(1, SPACE_TIME_STEP, id="time")])
+def test_quantiles_are_subsampled_in_space_and_time(nb_chain, space, time, tmp_path):
+    column = fixed_column(tmp_path)
+    column.compute_solve_transi(verbose=False)
+    direct_temperatures = np.asarray(column.get_temperatures_solve())[::space, ::time]
+    direct_flows = np.asarray(column.get_flows_solve())[::space, ::time]
+
+    random.seed(SEED)
+    np.random.seed(SEED)
+    column.compute_mcmc(quantile=EXTREME_QUANTILES, verbose=False, nb_iter=iterations(nb_chain, divisible=True),
+                        nb_chain=nb_chain, nitmaxburning=N_BURN_IN_MAX,
+                        n_sous_ech_space=space, n_sous_ech_time=time)
+    for quantile in EXTREME_QUANTILES:
+        assert column.get_temperatures_quantile(quantile) == pytest.approx(direct_temperatures, rel=QUANTILE_RTOL)
+        assert column.get_flows_quantile(quantile) == pytest.approx(direct_flows, rel=QUANTILE_RTOL)

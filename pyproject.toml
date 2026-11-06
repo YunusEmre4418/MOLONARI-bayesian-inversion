@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bayesian_inversion"
-version = "0.3.2"
+version = "0.3.3"
 description = "Bayesian inversion tools (priors, DREAM and random walk Metropolis samplers, energy, Gelman-Rubin diagnostic) and the MCMC inversion of a pyheatmy column"
 readme = "README.md"
 license =  {file = "LICENSE"}
