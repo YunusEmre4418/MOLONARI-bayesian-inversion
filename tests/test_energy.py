@@ -36,3 +36,30 @@ def test_energy_matches_gaussian_negative_log_likelihood():
     # -log L = (n/2) log(sigma2) + sum(r**2) / (2 sigma2), without the constant (n/2) log(2 pi)
     expected = (n / 2) * np.log(SIGMA2) + n * SHIFT_K**2 / (2 * SIGMA2)
     assert E == pytest.approx(expected)
+
+
+# Missing measurements (NaN), moved from pyheatmy's test_missing_measurements.py: the likelihood covers the measured
+# values only, so a NaN gives the same energy as the same data without it; a NaN of the model is not left out.
+MIDDLE_SENSOR = 1
+MISSING_TIMES = [10, 11, 50]
+FIRST = 0
+RTOL = 1e-12
+
+
+def test_energy_leaves_out_missing_measurements():
+    rng = np.random.default_rng(0)
+    measured = T_MEASURED_K + rng.normal(size=(N_SENSORS, N_TIMES))
+    simulated = measured + SHIFT_K
+    with_gaps = measured.copy()
+    with_gaps[MIDDLE_SENSOR, MISSING_TIMES] = np.nan
+    kept = ~np.isnan(with_gaps)
+    expected = compute_energy(simulated[kept], measured[kept], sigma2=SIGMA2, sigma2_distrib=uniform_density)
+    energy = compute_energy(simulated, with_gaps, sigma2=SIGMA2, sigma2_distrib=uniform_density)
+    assert energy == pytest.approx(expected, rel=RTOL)
+
+
+def test_energy_is_not_finite_when_the_model_is_not():
+    measured = np.full((N_SENSORS, len(MISSING_TIMES)), T_MEASURED_K)
+    simulated = measured + SHIFT_K
+    simulated[MIDDLE_SENSOR, FIRST] = np.nan       # a failed direct model must not look like a missing measurement
+    assert np.isnan(compute_energy(simulated, measured, sigma2=SIGMA2, sigma2_distrib=uniform_density))

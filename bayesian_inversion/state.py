@@ -1,14 +1,14 @@
 from dataclasses import dataclass
-from typing import Sequence
 
-from pyheatmy.params import Param
+import numpy as np
+
 
 @dataclass
 class State:
-    # one row of parameters per layer, in the MCMC space (Layer.mcmc_params);
-    # convert with InversionColumn.get_all_params or Layer.get_physical_params
+    # one row of parameters per block, in the MCMC space of the priors;
+    # convert with StateSpace.to_physical or StateSpace.physical_array
 
-    layers: Sequence[Param]
+    params: np.ndarray
     energy: float
     ratio_accept: float
-    sigma2_temp: float
+    sigma2: float  # physical
