@@ -133,6 +133,12 @@ def test_same_seed_gives_same_chains(run):
     assert np.array_equal(first, second)
 
 
+def test_dream_needs_two_groups_of_delta_other_chains():
+    with pytest.raises(ValueError, match=r"at least 2 \* delta \+ 1"):
+        DREAM(model, gaussian_energy, priors(), sigma2_prior(), 2 * DELTA, DELTA, N_CR, C, C_STAR)
+    DREAM(model, gaussian_energy, priors(), sigma2_prior(), 2 * DELTA + 1, DELTA, N_CR, C, C_STAR)
+
+
 def test_samplers_do_not_load_pyheatmy():
     code = "import sys, bayesian_inversion.samplers; assert 'pyheatmy' not in sys.modules"
     subprocess.run([sys.executable, "-c", code], check=True)

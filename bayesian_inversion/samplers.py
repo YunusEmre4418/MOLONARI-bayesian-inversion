@@ -71,6 +71,12 @@ class DREAM(Sampler):
     other chains (perturbation_DREAM), block by block, with crossover probabilities adapted during the burn-in."""
 
     def __init__(self, model, energy, priors, sigma2_prior, nb_chain, delta, n_CR, c, c_star):
+        # the proposal of a chain uses two disjoint groups of delta other chains (perturbation_DREAM)
+        if nb_chain < 2 * delta + 1:
+            raise ValueError(
+                f"DREAM needs at least 2 * delta + 1 = {2 * delta + 1} chains for delta = {delta}: the proposal of a "
+                f"chain uses two disjoint groups of delta other chains; got nb_chain = {nb_chain}."
+            )
         super().__init__(model, energy, priors, sigma2_prior, nb_chain)
         self.delta = delta
         self.n_CR = n_CR
