@@ -1,4 +1,4 @@
-"""MCMC samplers that do not know the model: DREAM, with several chains.
+"""MCMC samplers that do not know the model: DREAM with several chains and random walk Metropolis with one chain.
 A sampler moves its chains in the MCMC space of the priors and sees the model only through two functions:
 
 - model(x) -> output: x has one row per block of parameters (a layer of a pyheatmy column) and one column per
@@ -8,6 +8,8 @@ A sampler moves its chains in the MCMC space of the priors and sees the model on
 
 The chains also move sigma2, in the MCMC space of its prior. The caller runs the iterations one step at a time,
 records the states and decides when the burn-in ends."""
+
+from random import random
 
 import numpy as np
 
@@ -150,3 +152,38 @@ class DREAM(Sampler):
 
         return accepted
 
+
+class RandomWalk(Sampler):
+    """Random walk Metropolis with one chain: each parameter moves by a Gaussian step of the sigma of its prior,
+    wrapped around its range (Prior.perturb). The chain starts from the best of several draws from the priors."""
+
+    def __init__(self, model, energy, priors, sigma2_prior):
+        super().__init__(model, energy, priors, sigma2_prior, nb_chain=1)
+        self.nb_draws = 0
+
+    def uniform(self):
+        return random()
+
+    def draw(self):
+        """Draw the parameters and sigma2 from the priors and keep them as the start of the chain if their energy
+        is the lowest so far (the first draw on a tie)."""
+        x = self.sample_prior()
+        sigma2 = self.sigma2_prior.sample()
+        output, energy = self.evaluate(x, sigma2)
+        if self.nb_draws == 0 or energy < self.energy[0]:
+            self.x[0], self.sigma2[0], self.energy[0], self.output[0] = x, sigma2, energy, output
+        self.nb_draws += 1
+
+    def step(self):
+        """One iteration: a proposal, accepted or not. Return whether the chain moved."""
+        x_proposal = np.array(
+            [
+                [prior.perturb(value) for prior, value in zip(block, values)]
+                for block, values in zip(self.priors, self.x[0])
+            ],
+            np.float64,
+        )
+        # sigma2 goes to the physical space and back, as in the former code, which kept it there between two
+        # iterations: the results stay the same to the bit
+        sigma2_proposal = self.sigma2_prior.perturb(self.sigma2_prior.physical_to_mcmc(self.sigma2_physical(0)))
+        return self.metropolis(0, x_proposal, sigma2_proposal)

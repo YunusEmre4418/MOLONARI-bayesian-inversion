@@ -3,7 +3,7 @@ parameters (DREAM with several chains, random walk Metropolis with one), its rec
 The methods were moved from pyheatmy.Column as they were."""
 
 from typing import Sequence, Union
-from random import random, choice
+from random import choice
 from operator import attrgetter
 from numbers import Number
 import sys
@@ -36,9 +36,9 @@ from bayesian_inversion.config import (
     SIGMA2_MIN_T,
 )
 from bayesian_inversion.diagnostics import gelman_rubin
-from bayesian_inversion.energy import compute_energy, compute_log_acceptance
+from bayesian_inversion.energy import compute_energy
 from bayesian_inversion.prior import Prior
-from bayesian_inversion.samplers import DREAM
+from bayesian_inversion.samplers import DREAM, RandomWalk
 from bayesian_inversion.state import State
 
 
@@ -120,8 +120,6 @@ class InversionColumn(Column):
             # uniform in the MCMC space of the prior, log10(sigma2) for this range: the Jeffreys prior 1 / sigma2
             sigma2_temp_prior = Prior((SIGMA2_MIN_T, SIGMA2_MAX_T), RANDOMWALKSIGMAT)
             sigma2_distrib = sigma2_temp_prior.density
-        # the chains move sigma2 in the MCMC space of its prior; the energy and the states use the physical value
-        sigma2_physical = sigma2_temp_prior.mcmc_to_physical
 
         # vérification des types des arguments
         if isinstance(quantile, Number):
@@ -303,12 +301,6 @@ class InversionColumn(Column):
             )
 
         else:  # cas single chain
-            _temp_iter = np.zeros(
-                (self._nb_cells, len(self._times)), np.float64
-            )  # dernière température acceptée pour la colonne
-            _flow_iter = np.zeros(
-                (self._nb_cells, len(self._times)), np.float64
-            )  # dernier débit accepté pour la colonne
             # float32: these samples only feed the quantiles, and their size grows with the length of the series
             _temp = np.zeros(
                 (sizesubsampling, self._nb_cells, len(self._times)), np.float32
@@ -317,92 +309,49 @@ class InversionColumn(Column):
                 (sizesubsampling, self._nb_cells, len(self._times)), np.float32
             )  # stockage des débits sous échantillonées pendant la mcmc
 
+            # the direct model runs on self, which keeps the parameters of the last state of the chain
+            sampler = RandomWalk(self._layer_model(self), energy, priors, sigma2_temp_prior)
+
             for i in trange(nitmaxburning, desc="Init Mcmc ", file=sys.stdout):
-                # on tire un jeu de paramètres aléatoires selon les priors
-                self.sample_params_from_priors()
-                init_sigma2_temp = sigma2_temp_prior.sample()
+                # on tire un jeu de paramètres aléatoires selon les priors, on garde le meilleur
+                sampler.draw()
 
-                # on lance le modèle direct et on stocke les résultats dans la classe state
-                self.compute_solve_transi(verbose=False)
-                self._states.append(
-                    State(
-                        layers=self._get_list_mcmc_params(),
-                        energy=compute_energy(
-                            self.temperatures_solve[ind_ref, :],
-                            temp_ref,
-                            sigma2=sigma2_physical(init_sigma2_temp),
-                            sigma2_distrib=sigma2_distrib,
-                        ),
-                        ratio_accept=1,
-                        sigma2_temp=sigma2_physical(init_sigma2_temp),
-                    )
+            self._states = [
+                State(
+                    layers=sampler.x[0].copy(),  # copy: sampler.x[0] is overwritten in place on acceptance
+                    energy=sampler.energy[0],
+                    ratio_accept=1,
+                    sigma2_temp=sampler.sigma2_physical(0),
                 )
-
-            # on garde uniquement le meilleur état
-            self._states = [min(self._states, key=attrgetter("energy"))]
-
-            # on initialise la colonnne pour les paramètres qui minimisent l'énergie
-            for l, layer in enumerate(self.all_layers):
-                layer.mcmc_params = Param(*self._states[0].layers[l])
-
-            self.compute_solve_transi(verbose=False)
-
-            _temp_iter = self.get_temperatures_solve()
-            _flow_iter = self.get_flows_solve()
+            ]
 
             nb_accepted = 0
 
             for i in trange(nb_iter, desc="Mcmc Computation", file=sys.stdout):
-                # on stocke les paramètres avant la proposition de pas
-                X = self._get_list_mcmc_params()
-
-                # on fait une proposition de pas
-                self.perturb_params()
-                sigma2_temp_proposal = sigma2_temp_prior.perturb(
-                    sigma2_temp_prior.physical_to_mcmc(self._states[-1].sigma2_temp)
-                )
-
-                # on calcule l'énergie pour les nouveaux paramètres
-                self.compute_solve_transi(verbose=False)
-
-                Energy_Proposal = compute_energy(
-                    self.temperatures_solve[ind_ref, :],
-                    temp_ref,
-                    sigma2_physical(sigma2_temp_proposal),
-                    sigma2_distrib=sigma2_temp_prior.density,
-                )
-
-                log_ratio_accept = compute_log_acceptance(
-                    Energy_Proposal, self._states[-1].energy
-                )
-
-                if np.log(random()) < log_ratio_accept:
+                if sampler.step():
                     nb_accepted += 1
-
-                    _temp_iter = self.get_temperatures_solve()
-                    _flow_iter = self.get_flows_solve()
-
                     self._states.append(
                         State(
-                            layers=self._get_list_mcmc_params(),
-                            energy=Energy_Proposal,
+                            layers=sampler.x[0].copy(),
+                            energy=sampler.energy[0],
                             ratio_accept=nb_accepted / (i + 1),
-                            sigma2_temp=sigma2_physical(sigma2_temp_proposal),
+                            sigma2_temp=sampler.sigma2_physical(0),
                         )
                     )
 
                 else:  # le saut est rejeté
                     self._states.append(self._states[-1])
 
-                    # On remet les paramètres précédent pour la colonne
-                    for l, layer in enumerate(self.all_layers):
-                        layer.mcmc_params = Param(*X[l])
-
                 if i % n_sous_ech_iter == 0:
                     # Si i est un multiple de n_sous_ech_iter, on stocke
                     k = i // n_sous_ech_iter
-                    _temp[k] = _temp_iter[::n_sous_ech_space, ::n_sous_ech_time]
-                    _flows[k] = _flow_iter[::n_sous_ech_space, ::n_sous_ech_time]
+                    temperatures, flows = sampler.output[0]  # dernière température et dernier débit acceptés
+                    _temp[k] = temperatures[::n_sous_ech_space, ::n_sous_ech_time]
+                    _flows[k] = flows[::n_sous_ech_space, ::n_sous_ech_time]
+
+            # the model has run the last proposal: the column takes back the parameters of the last state
+            for layer, params in zip(self.all_layers, sampler.x[0]):
+                layer.mcmc_params = Param(*params)
 
             self._acceptance = nb_accepted / nb_iter
 

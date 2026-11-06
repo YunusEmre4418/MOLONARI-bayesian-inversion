@@ -1,4 +1,4 @@
-"""Tests of the DREAM sampler on a toy target, without pyheatmy: a Gaussian with independent
+"""Tests of the samplers (DREAM, RandomWalk) on a toy target, without pyheatmy: a Gaussian with independent
 parameters, whose mean and variance are known. The model returns its parameters; the energy is the negative
 log-density of the Gaussian and does not depend on sigma2."""
 
@@ -7,9 +7,10 @@ import subprocess
 import sys
 
 import numpy as np
+import pytest
 
 from bayesian_inversion import Prior
-from bayesian_inversion.samplers import DREAM
+from bayesian_inversion.samplers import DREAM, RandomWalk
 
 SEED = 20261106
 MEAN = np.array([1.0, -2.0])
@@ -28,6 +29,9 @@ C = 0.1
 C_STAR = 1e-12
 DREAM_BURN_IN = 200             # adapted steps left out
 DREAM_ITER = 2000               # steps kept: N_CHAIN * DREAM_ITER states
+RWM_DRAWS = 25                  # draws from the priors for the start of the chain (NBBURNING)
+RWM_BURN_IN = 1000
+RWM_ITER = 20000
 
 # Monte Carlo error: batch means over consecutive iterations, which accounts for the autocorrelation of the chains
 N_BATCH = 20
@@ -77,6 +81,21 @@ def run_dream(n_iter, burn_in, fixed_middle=False):
     return np.array(samples)
 
 
+def run_rwm(n_iter, burn_in, fixed_middle=False):
+    """Samples of the chain: array (n_iter, 1, n_param)."""
+    energy = energy_without_fixed if fixed_middle else gaussian_energy
+    sampler = RandomWalk(model, energy, priors(fixed_middle), sigma2_prior())
+    for _ in range(RWM_DRAWS):
+        sampler.draw()
+    for _ in range(burn_in):
+        sampler.step()
+    samples = []
+    for _ in range(n_iter):
+        sampler.step()
+        samples.append(sampler.x[:, 0].copy())
+    return np.array(samples)
+
+
 def batch_mean_and_error(values):
     """Mean over iterations and chains of values (n_iter, n_chain, n_param), and its standard error from the
     means of N_BATCH batches of consecutive iterations."""
@@ -84,27 +103,33 @@ def batch_mean_and_error(values):
     return values.mean(axis=(0, 1)), batches.std(axis=0, ddof=1) / np.sqrt(N_BATCH)
 
 
-def test_samples_have_the_mean_and_variance_of_the_target():
+@pytest.mark.parametrize("run, n_iter, burn_in", [
+    pytest.param(run_dream, DREAM_ITER, DREAM_BURN_IN, id="DREAM"),
+    pytest.param(run_rwm, RWM_ITER, RWM_BURN_IN, id="RWM"),
+])
+def test_samples_have_the_mean_and_variance_of_the_target(run, n_iter, burn_in):
     seed()
-    samples = run_dream(DREAM_ITER, DREAM_BURN_IN)
+    samples = run(n_iter, burn_in)
     mean, mean_error = batch_mean_and_error(samples)
     assert np.all(np.abs(mean - MEAN) < N_STANDARD_ERRORS * mean_error), (mean, mean_error)
     variance, variance_error = batch_mean_and_error((samples - MEAN) ** 2)
     assert np.all(np.abs(variance - STD**2) < N_STANDARD_ERRORS * variance_error), (variance, variance_error)
 
 
-def test_fixed_parameter_does_not_move():
+@pytest.mark.parametrize("run", [pytest.param(run_dream, id="DREAM"), pytest.param(run_rwm, id="RWM")])
+def test_fixed_parameter_does_not_move(run):
     seed()
-    samples = run_dream(SHORT_ITER, burn_in=SHORT_ITER, fixed_middle=True)
+    samples = run(SHORT_ITER, burn_in=SHORT_ITER, fixed_middle=True)
     assert np.all(samples[:, :, 1] == FIXED_VALUE)
     assert np.all(np.ptp(samples[:, :, [0, 2]], axis=0) > 0)
 
 
-def test_same_seed_gives_same_chains():
+@pytest.mark.parametrize("run", [pytest.param(run_dream, id="DREAM"), pytest.param(run_rwm, id="RWM")])
+def test_same_seed_gives_same_chains(run):
     seed()
-    first = run_dream(SHORT_ITER, SHORT_ITER)
+    first = run(SHORT_ITER, SHORT_ITER)
     seed()
-    second = run_dream(SHORT_ITER, SHORT_ITER)
+    second = run(SHORT_ITER, SHORT_ITER)
     assert np.array_equal(first, second)
 
 
