@@ -36,9 +36,9 @@ from bayesian_inversion.config import (
     SIGMA2_MIN_T,
 )
 from bayesian_inversion.diagnostics import gelman_rubin
-from bayesian_inversion.dream import perturbation_DREAM
 from bayesian_inversion.energy import compute_energy, compute_log_acceptance
 from bayesian_inversion.prior import Prior
+from bayesian_inversion.samplers import DREAM
 from bayesian_inversion.state import State
 
 
@@ -53,6 +53,19 @@ class InversionColumn(Column):
         self._quantiles_temperatures = None
         # dictionnaire indexé par les quantiles (0.05,0.5,0.95) à qui on a associe un array de deux dimensions : dimension 1 les profondeurs, dimension 2 : liste des valeurs de débits spécifiques associés au quantile, de longueur les temps de mesure
         self._quantiles_flows = None
+
+    @staticmethod
+    def _layer_model(column):
+        """The direct model of column for the samplers: x has one row of parameters per layer, in the MCMC space;
+        the output is the temperatures and the flows."""
+
+        def model(x):
+            for layer, params in zip(column.all_layers, x):
+                layer.mcmc_params = Param(*params)
+            column.compute_solve_transi(verbose=False)
+            return column.get_temperatures_solve(), column.get_flows_solve()
+
+        return model
 
     @checker
     def compute_mcmc(
@@ -124,17 +137,14 @@ class InversionColumn(Column):
         # quantités des différents paramètres
         nb_layer = len(self.all_layers)  # nombre de couches
         nb_param = N_PARAM_MCMC  # nombre de paramètres à estimer par couche
-        nb_accepted = 0  # nombre de propositions acceptées
         nb_burn_in_iter = 0  # nombre d'itération de burn-in
 
-        is_param_fixed = np.zeros((nb_layer, nb_param), dtype=bool)
-        for l, layer in enumerate(self.all_layers):
-            for p, prior in enumerate(layer.Prior_list):
-                if prior.is_fixed:
-                    is_param_fixed[l, p] = True
+        # the samplers see the layers through their priors, the direct model and the energy of its temperatures
+        priors = [layer.Prior_list for layer in self.all_layers]
 
-        # variables pour l'état courant
-        temp_proposal = np.zeros((self._nb_cells, len(self._times)), np.float64)
+        def energy(output, sigma2):
+            temperatures, _ = output
+            return compute_energy(temperatures[ind_ref], temp_ref, sigma2, sigma2_distrib)
 
         # variables liées au sous-échantillonnage
         nb_cells_sous_ech = int(np.ceil(self._nb_cells / n_sous_ech_space))
@@ -144,14 +154,6 @@ class InversionColumn(Column):
         # différentes chaînes, ce qui ne peut pas être vu comme un cas particulier du Random Walk Metropolis qui est basé lui sur le principe d'une perturbation gaussienne symétrique
 
         if nb_chain > 1:
-            # Voir si ces variables ne peuvent pas devenir des attributs de State
-            _temp_iter_chain = np.zeros(
-                (nb_chain, self._nb_cells, len(self._times)), np.float64
-            )  # dernière température acceptée pour chaque chaine
-            _flow_iter_chain = np.zeros(
-                (nb_chain, self._nb_cells, len(self._times)), np.float64
-            )  # dernier débit accepté pour chaque chaine
-
             # nombre d'itérations sous-échantillonnées avec initialisation
             # float32: these samples only feed the quantiles, and their size grows with the length of the series
             _temp = np.zeros(
@@ -163,64 +165,21 @@ class InversionColumn(Column):
                 np.float32,
             )  # stockage des débits sous échantillonées pendant la mcmc
 
-            # création de la matrice des bornes des paramètres (sert à s'assurer que la proposition de paramètres est dans les bornes)
-            ranges = np.empty((nb_layer, nb_param, 2))
-            for l in range(nb_layer):
-                for p in range(nb_param):
-                    lower_bound, upper_bound = (
-                        self.all_layers[l].Prior_list[p].mcmc_range
-                    )
-                    ranges[l, p] = [
-                        lower_bound,
-                        upper_bound,
-                    ]  # On prend les priors du paramètre p de la couche l.
+            # the direct model of all the chains runs on a single copy of the column: the parameters of self do not change
+            worker = copy.deepcopy(self)
+            # At its first call, checker stores on the instance a compute_solve_transi bound to that instance, and
+            # deepcopy does not copy functions: without this line, the copy would solve the original column.
+            worker.compute_solve_transi = types.MethodType(Column.compute_solve_transi, worker)
 
-            # objets liés à DREAM
-            cr_vec = np.arange(1, n_CR + 1) / n_CR  # Valeur des crossover
-            n_id = np.zeros(
-                (nb_layer, n_CR), np.float64
-            )  # Nombre de fois où chaque crossover est utilisé
-            J = np.zeros((nb_layer, n_CR), np.float64)  # Matrice des sauts
-            pcr = (
-                np.ones((nb_layer, n_CR)) / n_CR
-            )  # Probabilité de choisir un crossover, initialisé de manière uniforme
-            id_layer = np.zeros(
-                nb_layer, np.int32
-            )  # Vecteur qui recense les indices de crossover choisis pour chaque couche
-
-            # Création d'autant d'instance de colonnes que de chaines
-
-            multi_chain = [copy.deepcopy(self) for _ in range(nb_chain)]
-
-            # On redéfinit l'appel du modèle direct sur les deep copies sinon le modèle direct s'exécute sur les paramètre de la colonne self
-            # Raisons inconnues peut-être liées au décorateur @checker
-
-            for column in multi_chain:
-                column.compute_solve_transi = types.MethodType(
-                    Column.compute_solve_transi, column
-                )
+            sampler = DREAM(
+                self._layer_model(worker), energy, priors, sigma2_temp_prior, nb_chain, delta, n_CR, c, c_star
+            )
+            is_param_fixed = sampler.is_fixed
 
             ### initialisation des énergie
 
-            # lancement du modèle direct et mise à jours de tous les paramètres dans la matrice X, les énergies dans la matrice Energy
-            # et on les stocke dans l'attribut _state de la colonne qui ne sert qu'à plot les distribution et à récupérer les paramètres qui minimisent l'énergie
-
-            self._states = list()
-            X = np.zeros((nb_chain, nb_layer, nb_param), np.float64)
-            Energy = np.zeros((nb_chain), np.float64)
-            sigma2_chain = np.zeros(nb_chain, np.float64)  # sigma2 courant de chaque chaîne
-
-            for j, column in enumerate(multi_chain):
-                column.sample_params_from_priors()
-                X[j] = column._get_list_mcmc_params()
-                sigma2_chain[j] = sigma2_temp_prior.sample()
-
-                column.compute_solve_transi(verbose=False)
-                _temp_iter_chain[j] = column.get_temperatures_solve()
-                _flow_iter_chain[j] = column.get_flows_solve()
-                Energy[j] = compute_energy(
-                    _temp_iter_chain[j][ind_ref], temp_ref, sigma2_physical(sigma2_chain[j]), sigma2_distrib
-                )
+            # lancement du modèle direct pour les paramètres tirés des priors, par chaîne
+            sampler.initialize()
 
             ### stockage des résultats
             # XBurnIn va servir à stocker les paramètres pour toutes les itérations de chaque couche de chaque chaîne pendant le Burn In
@@ -232,7 +191,7 @@ class InversionColumn(Column):
 
             # en particulier la première instance de XBurnIn est égale à X :
 
-            XBurnIn[0] = X
+            XBurnIn[0] = sampler.x
 
             print(
                 f"Initialisation - Utilisation de la mémoire (en Mo) : {process.memory_info().rss / 1e6}"
@@ -244,99 +203,10 @@ class InversionColumn(Column):
             r_hat = gelman_rubin(XBurnIn[:1], is_param_fixed)
             burn_in_converged = np.all(r_hat[~is_param_fixed] <= threshold)
             for i in trange(nitmaxburning, desc="Burn in phase"):
-                # Initialisation pour les nouveaux paramètres
-                std_X = np.std(X, axis=0)  # calcul des écarts types des paramètres
-                # afin d'éviter la division par zéro dans le calcul du saut dans le cas d'un paramètre fixe
-                std_X[std_X == 0] = 1.0
-
-                for j, column in enumerate(multi_chain):
-                    # On lance la perturbation DREAM pour cette colonne, on en tire un nouveau jeu de paramètre X_proposal,
-                    # l'ensemble des indices de crossover choisis et la perturbation dX_colonne
-                    X_proposal, dX, id_layer = perturbation_DREAM(
-                        nb_chain,
-                        nb_layer,
-                        nb_param,
-                        X,
-                        id_layer,
-                        j,
-                        delta,
-                        n_CR,
-                        c,
-                        c_star,
-                        cr_vec,
-                        pcr,
-                        ranges,
-                        is_param_fixed,
-                    )
-                    sigma2_temp_proposal = sigma2_temp_prior.perturb(
-                        sigma2_chain[j]
-                    )  # On tire un nouveau sigma2
-
-                    # On met à jour les paramètres de la colonne j selon X_proposal pour appeler le modèle direct et calculer l'énergie:
-                    for l, layer in enumerate(column.all_layers):
-                        layer.mcmc_params = Param(*X_proposal[l])
-
-                    # Calcul du profil de température associé aux nouveaux paramètres
-                    column.compute_solve_transi(verbose=False)
-
-                    # On récupère les températures et les débits associés aux nouveaux paramètres
-                    temp_proposal = column._temperatures
-
-                    Energy_Proposal = compute_energy(
-                        temp_proposal[ind_ref],
-                        temp_ref,
-                        sigma2_physical(sigma2_temp_proposal),
-                        sigma2_distrib,
-                    )  # calcul de l'énergie
-
-                    # calcul de la probabilité d'accpetation
-                    log_ratio_accept = Energy[j] - Energy_Proposal
-
-                    # Acceptation ou non des nouveaux paramètres
-
-                    if (
-                        np.log(np.random.uniform(0, 1)) < log_ratio_accept
-                    ):  # La perturbation est acceptée
-                        # on met à jour l'état de la colonne
-                        X[j] = (
-                            X_proposal  # actualisation des paramètres pour la chaine j
-                        )
-                        Energy[j] = Energy_Proposal
-                        sigma2_chain[j] = sigma2_temp_proposal
-                        _temp_iter_chain[j] = (
-                            temp_proposal  # actualisation du profil de température
-                        )
-
-                        _flow_iter_chain[j] = column.get_flows_solve()  # actualisation du débit
-
-
-                    else:
-                        dX = np.zeros((nb_layer, nb_param))
-                        # On remet les anciens paramètres pour la colonne :
-                        for l, layer in enumerate(column.all_layers):
-                            layer.mcmc_params = Param(*X[j][l])
-
-                    # Mise à jour du vecteur saut pour chaque couche
-                    for l in range(nb_layer):
-                        J[l, id_layer[l]] += np.sum((dX[l] / std_X[l]) ** 2)
-                        n_id[l, id_layer[l]] += 1
-
-                # Mise à jour du pcr pour chaque couche pour DREAM
-                for l in range(nb_layer):
-                    # On met à jour pcr avec la qualité des sauts J
-                    pcr[l][n_id[l] != 0] = J[l][n_id[l] != 0] / n_id[l][n_id[l] != 0]
-
-                    # On vérifie si la somme des probabilités est nulle
-                    if np.sum(pcr[l]) == 0:
-                        # Si oui (ce qui arrive si seul le paramètre fixe a été perturbé),
-                        # on réinitialise les probabilités à une distribution uniforme.
-                        pcr[l][:] = 1.0 / n_CR
-                    else:
-                        # Sinon, on normalise comme d'habitude.
-                        pcr[l] = pcr[l] / np.sum(pcr[l])
+                sampler.step(adapt=True)
 
                 # Fin d'une itération, on vérifie si on peut sortir du burn-in
-                XBurnIn[i + 1] = X
+                XBurnIn[i + 1] = sampler.x
 
                 r_hat = gelman_rubin(XBurnIn[: i + 2], is_param_fixed)
                 burn_in_converged = np.all(r_hat[~is_param_fixed] <= threshold)
@@ -365,10 +235,10 @@ class InversionColumn(Column):
             for j in range(nb_chain):
                 self._states.append(
                     State(
-                        layers=X[j].copy(),  # copy: X[j] is overwritten in place on acceptance
-                        energy=Energy[j],
+                        layers=sampler.x[j].copy(),  # copy: sampler.x[j] is overwritten in place on acceptance
+                        energy=sampler.energy[j],
                         ratio_accept=1,
-                        sigma2_temp=sigma2_physical(sigma2_chain[j]),
+                        sigma2_temp=sampler.sigma2_physical(j),
                     )
                 )
 
@@ -386,98 +256,36 @@ class InversionColumn(Column):
             )
 
             for i in trange(nb_iter, desc="DREAM MCMC Computation", file=sys.stdout):
-                # Initialisation pour les nouveaux paramètres
-                std_X = np.std(X, axis=0)  # calcul des écarts types des paramètres
-                std_X[std_X == 0] = (
-                    1.0  # afin d'éviter la division par zéro dans le calcul du saut dans le cas d'un paramètre fixe
-                )
+                accepted = sampler.step()
 
-                for j, column in enumerate(multi_chain):
-                    X_proposal, dX, id_layer = perturbation_DREAM(
-                        nb_chain,
-                        nb_layer,
-                        nb_param,
-                        X,
-                        id_layer,
-                        j,
-                        delta,
-                        n_CR,
-                        c,
-                        c_star,
-                        cr_vec,
-                        pcr,
-                        ranges,
-                        is_param_fixed,
-                    )
-                    sigma2_temp_proposal = sigma2_temp_prior.perturb(
-                        sigma2_chain[j]
-                    )  # On tire un nouveau sigma2
-
-                    # Mise à jour des paramètres de la colonne j :
-                    for l, layer in enumerate(column.all_layers):
-                        layer.mcmc_params = Param(*X_proposal[l])
-
-                    # Calcul du profil de température associé aux nouveaux paramètres
-                    column.compute_solve_transi(verbose=False)
-                    temp_proposal = (
-                        column.get_temperatures_solve()
-                    )  # récupération du profil de température
-
-                    Energy_Proposal = compute_energy(
-                        temp_proposal[ind_ref],
-                        temp_ref,
-                        sigma2_physical(sigma2_temp_proposal),
-                        sigma2_distrib,
-                    )  # calcul de l'énergie
-                    # calcul de la probabilité d'accpetation
-                    log_ratio_accept = compute_log_acceptance(
-                        Energy_Proposal, Energy[j]
-                    )
-
-                    # Acceptation ou non des nouveaux paramètres
-                    if np.log(np.random.uniform(0, 1)) < log_ratio_accept:
-                        # on met à jour l'état de la colonne
-                        X[j] = X_proposal
-                        Energy[j] = Energy_Proposal
-                        sigma2_chain[j] = sigma2_temp_proposal
+                for j in range(nb_chain):
+                    if accepted[j]:
                         self._acceptance[j] += 1
-
-                        _temp_iter_chain[j] = temp_proposal
-                        _flow_iter_chain[j] = column.get_flows_solve()
-
                         self._states.append(
                             State(
-                                layers=X[j].copy(), # copy: X[j] is overwritten in place on acceptance
-                                energy=Energy[j],
+                                layers=sampler.x[j].copy(), # copy: sampler.x[j] is overwritten in place on acceptance
+                                energy=sampler.energy[j],
                                 ratio_accept=1,
-                                sigma2_temp=sigma2_physical(sigma2_temp_proposal),
+                                sigma2_temp=sampler.sigma2_physical(j),
                             )
                         )
-
                     else:
-                        dX = np.zeros((nb_layer, nb_param), np.float64)
                         # On ne met pas à jour l'état :
                         self._states.append(self._states[-nb_chain])
-                        # On remet les anciens paramètres pour la colonne :
-                        for l, layer in enumerate(column.all_layers):
-                            layer.mcmc_params = Param(*X[j][l])
 
                 if i % n_sous_ech_iter == 0:  # sous échantillonnage
                     # Si le numéro de l'itération i est un multiple de n_sous_ech_iter, on stocke
                     k = i // n_sous_ech_iter
                     for j in range(nb_chain):
+                        temperatures, flows = sampler.output[j]  # dernière température et dernier débit acceptés
                         if np.isnan(
-                            _temp_iter_chain[j, ::n_sous_ech_space, ::n_sous_ech_time]
+                            temperatures[::n_sous_ech_space, ::n_sous_ech_time]
                         ).any():
                             _temp[k, j] = _temp[(k - 1), j]
                             _flows[k, j] = _flows[(k - 1), j]
                         else:
-                            _temp[k, j] = _temp_iter_chain[
-                                j, ::n_sous_ech_space, ::n_sous_ech_time
-                            ]
-                            _flows[k, j] = _flow_iter_chain[
-                                j, ::n_sous_ech_space, ::n_sous_ech_time
-                            ]
+                            _temp[k, j] = temperatures[::n_sous_ech_space, ::n_sous_ech_time]
+                            _flows[k, j] = flows[::n_sous_ech_space, ::n_sous_ech_time]
 
             for j in range(nb_chain):
                 self._acceptance[j] /= nb_iter
