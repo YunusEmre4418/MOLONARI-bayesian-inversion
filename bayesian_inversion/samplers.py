@@ -189,7 +189,5 @@ class RandomWalk(Sampler):
             ],
             np.float64,
         )
-        # sigma2 goes to the physical space and back, as in the former code, which kept it there between two
-        # iterations: the results stay the same to the bit
-        sigma2_proposal = self.sigma2_prior.perturb(self.sigma2_prior.physical_to_mcmc(self.sigma2_physical(0)))
+        sigma2_proposal = self.sigma2_prior.perturb(self.sigma2[0])
         return self.metropolis(0, x_proposal, sigma2_proposal)

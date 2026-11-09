@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bayesian_inversion"
-version = "0.4.1"
+version = "0.4.2"
 description = "MCMC estimation of the parameters of a model from its measurements: priors and state space, DREAM and random walk Metropolis samplers, energy, Gelman-Rubin diagnostic"
 readme = "README.md"
 license =  {file = "LICENSE"}
