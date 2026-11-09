@@ -1,7 +1,7 @@
 # Readme - Algorithme MCMC
-_Derniere mise a jour : 2025-11-05_
+_Derniere mise a jour : 2026-11-06 (bayesian_inversion 0.4.0)_
 
-Ce document decrit le fonctionnement de l'algorithme MCMC (Monte Carlo - Markov Chains) implemente dans `core.py` ainsi que la gestion de la classe `Prior` dans `params.py`.
+Ce document decrit le fonctionnement de l'algorithme MCMC (Monte Carlo - Markov Chains) de `bayesian_inversion` : `run_mcmc` dans `mcmc.py`, les echantillonneurs `DREAM` et `RandomWalk` dans `samplers.py`, la classe `Prior` dans `prior.py` et l'espace d'etats `StateSpace` dans `state_space.py`. Le modele physique n'est pas dans ce paquet : `run_mcmc` le recoit comme une fonction des parametres (pour une colonne de pyheatmy, `Column.simulate`).
 
 
 ## But
@@ -15,7 +15,7 @@ Pour ce faire, on determine la **distribution de probabilite a posteriori** de c
 Nous cherchons a determiner la distribution a posteriori $\pi(Y|Z)$, ou $\pi(Y | Z)$, ou $Y$ represente l'ensemble de nos parametres inconnus ("State Space") et $Z$ represente nos donnes de mesures ("Observations")
 D'apres le theoreme de Bayes : $$\pi(Y|Z) \propto f(Z|Y) \times f(Y)$$
 
-- $f(Y)$ est la **distribution a priori (Prior)** : C'est notre connaissance initiale sur les parametres $Y$ avant de voir les donnees $Z$. Dans le code cela est gere par la classe `Prior` (par exemple, `Prior_IntrinK`, `Prior_n`, etc.) qui definit une plage de valeurs possibles.
+- $f(Y)$ est la **distribution a priori (Prior)** : C'est notre connaissance initiale sur les parametres $Y$ avant de voir les donnees $Z$. Dans le code cela est gere par la classe `Prior`, qui definit une plage de valeurs possibles pour chaque parametre ; les priors de tous les parametres estimes forment un `StateSpace`, bloc par bloc (pour une colonne, un bloc par couche).
 - $f(Z|Y)$ est la **fonction de vraissemblance (Likelihood)** : Elle mesure la probabilite d'observer nos donnees $Z$ si les parametres etaient $Y$. Dans notre cas, elle quantifie l'ecart (l'erreur) entre les temperatures simulees par le modele $F(Y)$ et les temperatures reellement mesurees $Z$.
 
 
@@ -25,7 +25,7 @@ L'algorithme MCMC n'a pas besoin de calculer la distribution $\pi(Y|Z)$ directem
 On appelle cette fonction "Energie" $E(Y)$. L'objectif du MCMC n'est donc plus de "maximiser la probabilite" mais "minimiser **l'energie"**.
 En plus des parametres physiques, on ajoute le parametre $\sigma^2$, la variance de l'erreur entre les donnees et la realite, qui caracterise le **"niveau de confiance"** des mesures. D'apres le theoreme de Bayes, on a donc $\pi( Y | Z , \sigma ^ 2 ) \propto f (Z | Y , \sigma^2) \times f (Y) \times f (Y\sigma^2) $.
 En passant au log-negatif on obtient la forme suivante pour l'energie : $E(Y, \sigma^2) \approx -\log(f(Z | Y, \sigma^2)) - \log(f(Y)) - \log(f(\sigma^2))$
-La fonction `compute_energy` dans `core.py` permet de calculer cette energie en supposant des erreurs de mesure  gaussiennes: $$E(Y, \sigma^2) = \underbrace{ \left( N \log(\sigma^2) + \frac{\|Z - F(Y)\|^2}{2\sigma^2} \right) }_{\substack{ (= -\log(f(Z | Y, \sigma^2))) \\ \text{En supposant les erreurs gaussiennes}}} - \log(f(\sigma^2))$$
+La fonction `compute_energy` dans `energy.py` permet de calculer cette energie en supposant des erreurs de mesure  gaussiennes: $$E(Y, \sigma^2) = \underbrace{ \left( N \log(\sigma^2) + \frac{\|Z - F(Y)\|^2}{2\sigma^2} \right) }_{\substack{ (= -\log(f(Z | Y, \sigma^2))) \\ \text{En supposant les erreurs gaussiennes}}} - \log(f(\sigma^2))$$
 Ou : 
 
 - $Z$ sont les temperatures mesurees (`temp_ref`).
@@ -45,37 +45,37 @@ L'algorithme explore l'espace des parametres en proposant un nouvel ensemble de 
 
 Pour decider s'il faut accepter cette proposition, on calcule un **ratio d'acceptation**. Pour un algorithme de type "Symmetric Random Walk" (utilise dans le script), le critere de Metropolis-Hastings se simplifie. La probabilite d'accepter est : $$P_{accept} = \min\left(1, \exp(E(Y_{prev}) - E(Y_{prop}))\right)$$
 - Si l'energie **diminue** ($E_{prop}<E_{prev}$), la proposition est **meilleure**. Le ratio est $>1$, et la proposition est **toujours acceptee**.
-- Si l'energie **augmente** ($E_{prop}>E_{prev}$), la proposition est **moins bonne**. Cependant, elle est **parfois acceptee** avec une probabilite $\exp(E(Y_{prev}) - E(Y_{prop}))$ (dont le logarithme est calcule dans le code : `log_ratio_accept = Energy[j] - Energy_Proposal` )
+- Si l'energie **augmente** ($E_{prop}>E_{prev}$), la proposition est **moins bonne**. Cependant, elle est **parfois acceptee** avec une probabilite $\exp(E(Y_{prev}) - E(Y_{prop}))$ (dont le logarithme est calcule dans le code par `compute_log_acceptance(E_prop, E_prev)`, soit $E_{prev} - E_{prop}$)
 
 Cette acceptation stochastique des "mauvais" pas permet a l'algorithme d'eviter de rester bloque dans un minimum local pour explorer l'ensemble de la distribution.
 
 
 ## Algorithmes implementes
 
-Le code `compute_mcmc` implemente deux variantes de l'algorithme MCMC, en fonction du nombre de chaines utilisees (`nb_chain`).
+La fonction `run_mcmc` implemente deux variantes de l'algorithme MCMC, en fonction du nombre de chaines utilisees (`nb_chain`) : `RandomWalk` pour une chaine, `DREAM` pour plusieurs. Elle fait les iterations une par une (`step()` de l'echantillonneur), enregistre les etats et calcule les quantiles.
 
 ### **Premier cas** : Chaine Unique (`nb_chain = 1`) - Random Walk Metropolis (RWM)
 
 C'est l'**aglorithme** MCMC le plus simple, qui correspond au **"Symmetric increments random-walk sampler (SIMH)"** decrit dans le cours.
 1. **Initialisation** : L'algorithme teste `nitmaxburning` jeux de parametres initiaux (tires des priors) et garde le meilleur (celui qui minimise l'energie) comme point de depart.
 2. **Iteration** (`nb_iter` etapes) : 
-    - **Proposition** : Un nouveau jeu de parametres $Y_{prop}$ est cree en perturbant aleatoirement le jeu precedent $Y_{prev}$ (via `self.perturb_params()`, grâce au parametre `user_sigma`). C'est donc une marche aleatoire (Random Walk).
-    - **Evaluation** : Le modele physique (`compute_solve_transi`) est lance avec $Y_{prop}$ pour calculer $F(Y_{prop})$ puis l'energie $E_{prop}$
+    - **Proposition** : Un nouveau jeu de parametres $Y_{prop}$ est cree en perturbant aleatoirement le jeu precedent $Y_{prev}$ (via `Prior.perturb`, grâce au parametre `user_sigma` de chaque prior). C'est donc une marche aleatoire (Random Walk).
+    - **Evaluation** : Le modele physique (la fonction `model` donnee a `run_mcmc`, par exemple `Column.simulate`) est lance avec $Y_{prop}$ pour calculer $F(Y_{prop})$ puis l'energie $E_{prop}$
     - **Decision** : La proposition est acceptee ou rejetee selon le critere de Metropolis. 
-    - **Stockage** : L'etat (accepte ou non) est stocke dans `self._states`.
+    - **Stockage** : L'etat (accepte ou non) est stocke dans `result.states`.
 
 ### **Second cas** : Chaines Multiples (`nb_chain > 1`) - DREAM
 
 Il s'agit d'un algorithme MCMC plus avance et efficace. Il appartient a la famille des **MCMC adaptatifs** mentionnes dans le cours.
 1. Phase de Burn-in (Prechauffage) :
- - Les `nb_chain` chaines sont lancees en parallele.
+ - Les `nb_chain` chaines evoluent ensemble. A chaque iteration, elles sont mises a jour l'une apres l'autre : la proposition de la chaine `j` utilise l'etat courant des autres chaines, y compris celles deja mises a jour pendant cette iteration. Le DREAM de reference (Vrugt et al., 2009) met a jour toutes les chaines a partir de l'etat de l'iteration precedente, ce qui permet d'evaluer le modele pour toutes les chaines en parallele ; ce n'est pas encore le cas ici.
  - **Proposition** : Au lieu d'une simple perturbation aleatoire, les propositions sont generees en utilisant l'**evolution differentielle**. Une nouvelle proposition pour la chaine `j` est creee en faisant la difference entre les etats d'autres chaines (gere par `perturbation_DREAM`).
  - **Adaptation** : L'algorithme est adaptatif : il apprend la forme de la distribution et ajuste ses strategies de proposition (vecteur `pcr`) pendant le burn-in.
- - **Convergence** : La phase de burn-in s'arrête lorsque les chaines ont converge vers la distribution a posteriori. Cette convergence est verifiee a l'aide du **critere de Gelman-Rubin** (implemente dans`Gelman_Rubin.py`).
+ - **Convergence** : La phase de burn-in s'arrête lorsque les chaines ont converge vers la distribution a posteriori. Cette convergence est verifiee a l'aide du **critere de Gelman-Rubin** (`gelman_rubin` dans `diagnostics.py`), calcule sur la derniere moitie des echantillons de chaque parametre libre ; si le burn-in atteint `nitmaxburning` sans converger, un avertissement le signale.
 2. Phase MCMC Principale
  - Une fois la convergence atteinte, l'algorithme continue de tourner pour `nb_iter` etapes.
  - Il continue d'utiliser l'algorithme DREAM pour generer des propositions.
- - Tous les etats acceptes de toutes les chaines sont stockes dans `self._states` pour construire les distributions finales.
+ - Les etats de toutes les chaines, une fois par iteration, sont stockes dans `result.states` pour construire les distributions finales.
 
  Dans les deux cas, pour s'assurer que la MCMC ne sorte jamais de l'intervalle a priori, les bords sont geres par **modulo**. Si un un saut "sort" de l'intervalle, il "re-entre" par l'autre extremite. Cette approche, comparee a l'approche par rebonds, permet de mieux explorer de l'espace.
 
@@ -90,15 +90,15 @@ Cela permet a l'utilisateur de "geler" un ou plusieurs parametres a une valeur c
 
 ## Resultats et Sorties
 
-A la fin de l'execution de `compute_mcmc`, les resultats suivant sont disponibles :
-- `self._states` : La liste complete de tous les etats (jeux de parametres $Y$) visites par la ou les chaines apres le burn-in.
-- `get_best_params()` : Renvoie le jeu de parametres $Y$ qui a produit la **plus faible energie**. C'est l'estimateur du **MAP** (maximum a pesteriori, mentionne dans le cours), qui correspond a la valeur la plus probable de $Y$.
-- `plot_all_param_pdf()` : Genere les histogrammes de `self._states`. Chaque histogramme represente la **distribution a posteriori** $\pi(Y_i|Z)$ d'un parametre $Y_i$.
-- `self._quantiles_temperatures` et `self._quantiles_flows` : Calculent les quantiles (par ex. 5%, 50%, 95%) sur les **sorties du modele** (temperatures $F(Y)$ et vitesse de Darcy). Cela permet de visualiser l'incertitude du modele, un avantage majeur de l'approche bayesienne.
+`run_mcmc` renvoie un `MCMCResult` :
+- `result.states` : La liste complete de tous les etats (jeux de parametres $Y$, dans l'espace MCMC) visites par la ou les chaines apres le burn-in ; `result.params()` et `result.chains()` les donnent en valeurs physiques, `result.energies()` et `result.sigma2()` leurs energies et leurs $\sigma^2$.
+- `result.best()` : Renvoie le jeu de parametres $Y$ qui a produit la **plus faible energie**. C'est l'estimateur du **MAP** (maximum a pesteriori, mentionne dans le cours), qui correspond a la valeur la plus probable de $Y$.
+- Les histogrammes de `result.params()` representent chacun la **distribution a posteriori** $\pi(Y_i|Z)$ d'un parametre $Y_i$ (le tutoriel 02 de MOLONARI-tuto les trace).
+- `result.quantiles` : Les quantiles (par ex. 5%, 50%, 95%) des **sorties du modele** stockees (par defaut les temperatures $F(Y)$ et les debits). Cela permet de visualiser l'incertitude du modele, un avantage majeur de l'approche bayesienne.
 
-## Gestion des Priors (`params.py`)
+## Gestion des Priors (`prior.py`)
 
-Un composant essentiel du modele MCMC est la maniere dont les **priors** (distributions a priori) sont definis et geres, ce qui est fait a l'aide de la classe `Prior` dans `params.py`.
+Un composant essentiel du modele MCMC est la maniere dont les **priors** (distributions a priori) sont definis et geres, ce qui est fait a l'aide de la classe `Prior` dans `prior.py`.
 
 L'implementation actuelle permet de transformer l'**espace de recherche** pour rendre l'exploration de chaque parametre plus efficace.
 
